@@ -28,12 +28,12 @@ func build() {
 	compileKotlin()
 	compileJava()
 	bundleJava()
-	buildBundle(*useAAB)
 	if *useAAB {
+		buildBundle(true)
 		buildAAB()
 		signAAB(keyStore, storePass, keyAlias, sigAlg)
 	} else {
-		alignAPK()
+		addDexToAPK(filepath.Join("build", "unaligned.apk"), filepath.Join("build", "classes.dex"))
 		signAPK(keyStore, storePass, keyAlias)
 	}
 }
@@ -80,14 +80,15 @@ func compileRes() {
 	}
 }
 
-// bundleRes bundles all the flat files into apk and generates R.* id file for java
 func bundleRes(useAAB bool) {
 	LogI("build", "bundling resources")
 
 	flats := getFiles("build/flats", ".flat")
-	args := []string{"link", "-I", androidJar, "--manifest", "AndroidManifest.xml", "-o", "build", "--java", "src", "--output-to-dir"}
+	args := []string{"link", "-I", androidJar, "--manifest", "AndroidManifest.xml", "--java", "src"}
 	if useAAB {
-		args = append(args, "--proto-format")
+		args = append(args, "-o", "build", "--output-to-dir", "--proto-format")
+	} else {
+		args = append(args, "-o", filepath.Join("build", "unaligned.apk"))
 	}
 	args = append(args, flats...)
 	cmd := exec.Command(aapt2Path, args...)
@@ -105,9 +106,15 @@ func compileKotlin() {
 
 	LogI("build", "compiling kotlin files")
 
-	jars := strings.Join(getFiles("jar", "jar"), ":")
+	jars := strings.Join(getFiles("jar", "jar"), string(os.PathListSeparator))
 
-	args := []string{"-d", filepath.Join("build", "classes"), "-classpath", androidJar + ":" + jars, "src"}
+	classpathParts := []string{androidJar}
+	if jars != "" {
+		classpathParts = append(classpathParts, jars)
+	}
+	classpath := strings.Join(classpathParts, string(os.PathListSeparator))
+
+	args := []string{"-jvm-target", "1.8", "-d", filepath.Join("build", "classes"), "-classpath", classpath, "src"}
 	args = append(args, kotlins...)
 	cmd := exec.Command(kotlincPath, args...)
 	out, err := cmd.CombinedOutput()
@@ -121,14 +128,48 @@ func compileJava() {
 	LogI("build", "compiling java files")
 
 	javas := getFiles("src", "java")
-	jars := strings.Join(getFiles("jar", "jar"), ":")
-
-	args := []string{"-d", filepath.Join("build", "classes"), "-classpath", androidJar + ":" + filepath.Join("build", "classes") + ":" + jars}
+	if len(javas) == 0 {
+		LogF("build", "no java files found in src")
+	}
+	
+	// 获取 jar 文件列表
+	jarFiles := getFiles("jar", "jar")
+	jars := strings.Join(jarFiles, string(os.PathListSeparator))
+	
+	// 构建 classpath
+	classpathParts := []string{
+		androidJar,
+		filepath.Join("build", "classes"),
+		"src",
+	}
+	if len(jarFiles) > 0 {
+		classpathParts = append(classpathParts, jars)
+	}
+	classpath := strings.Join(classpathParts, string(os.PathListSeparator))
+	
+	// 编译参数
+	args := []string{
+		"-encoding", "UTF-8",
+		"-source", "8",
+		"-target", "8",
+		"-d", filepath.Join("build", "classes"),
+		"-classpath", classpath,
+	}
 	args = append(args, javas...)
+	
+	// 调试输出
+	LogI("build", "javac command: " + javacPath + " " + strings.Join(args, " "))
+	
 	cmd := exec.Command(javacPath, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		LogF("build", string(out), args)
+		LogF("build", string(out))
+	}
+	
+	// 验证编译结果
+	classes := getFiles(filepath.Join("build", "classes"), ".class")
+	if len(classes) == 0 {
+		LogF("build", "no class files generated")
 	}
 }
 
@@ -142,13 +183,30 @@ func bundleJava() {
 	args := []string{"--lib", androidJar, "--release", "--output", "build"}
 	args = append(args, classes...)
 	args = append(args, jars...)
-	cmd := exec.Command(d8Path, args...)
+
+	LogI("build", "d8 command: "+d8Path+" "+strings.Join(args, " "))
+
+	var cmd *exec.Cmd
+	lowerD8Path := strings.ToLower(d8Path)
+	if strings.HasSuffix(lowerD8Path, ".bat") || strings.HasSuffix(lowerD8Path, ".cmd") {
+		javaExec := "java"
+		if javaBinPath != "" {
+			javaExec = filepath.Join(javaBinPath, "java.exe")
+		}
+
+		d8Jar := filepath.Join(filepath.Dir(d8Path), "lib", "d8.jar")
+		cmdArgs := []string{"-cp", d8Jar, "com.android.tools.r8.D8"}
+		cmdArgs = append(cmdArgs, args...)
+		cmd = exec.Command(javaExec, cmdArgs...)
+	} else {
+		cmd = exec.Command(d8Path, args...)
+	}
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		LogF("build", string(out), d8Path, args)
+		LogF("build", string(out))
 	}
 }
-
 func buildBundle(useAAB bool) {
 	outFile, err := os.Create(filepath.Join("build", "bundle.zip"))
 	if err != nil {

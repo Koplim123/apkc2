@@ -86,10 +86,17 @@ func findSDKs() {
 			LogE("doctor", err)
 		}
 		toolsPath = filepath.Join(sdkPath, "build-tools", btVersion)
-		aapt2Path = filepath.Join(toolsPath, "aapt2")
-		d8Path = filepath.Join(toolsPath, "d8")
-		zipAlignPath = filepath.Join(toolsPath, "zipalign")
-		apksignerPath = filepath.Join(toolsPath, "apksigner")
+		if runtime.GOOS == "windows" {
+			aapt2Path = filepath.Join(toolsPath, "aapt2.exe")
+			d8Path = filepath.Join(toolsPath, "d8.bat")
+			zipAlignPath = filepath.Join(toolsPath, "zipalign.exe")
+			apksignerPath = filepath.Join(toolsPath, "apksigner.bat")
+		} else {
+			aapt2Path = filepath.Join(toolsPath, "aapt2")
+			d8Path = filepath.Join(toolsPath, "d8")
+			zipAlignPath = filepath.Join(toolsPath, "zipalign")
+			apksignerPath = filepath.Join(toolsPath, "apksigner")
+		}
 		adbPath = filepath.Join(sdkPath, "platform-tools", "adb")
 		api := strings.Split(btVersion, ".")[0]
 		androidJar = filepath.Join(sdkPath, "platforms", "android-"+api, "android.jar")
