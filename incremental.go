@@ -13,6 +13,7 @@ import (
 const cachePath = "build/.incremental"
 
 type buildCache struct {
+	Encoding   string           `json:"encoding,omitempty"`
 	Res        string           `json:"res,omitempty"`
 	Src        string           `json:"src,omitempty"`
 	Classes    string           `json:"classes,omitempty"`
@@ -41,11 +42,26 @@ func saveCache(c buildCache) {
 	os.WriteFile(cachePath, data, 0644)
 }
 
+// --- file collectors ---
+
+func collect(dirs ...string) []string {
+	var out []string
+	for _, d := range dirs {
+		out = append(out, getFiles(d, "")...)
+	}
+	return out
+}
+
+func collectWithExt(dir, ext string) []string {
+	return getFiles(dir, ext)
+}
+
 // --- hash-based change detection ---
 
-// hashFiles computes a single SHA256 digest over the contents of all given files.
-// Files are sorted by path before hashing so the result is order-independent.
 func hashFiles(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
 	sorted := make([]string, len(files))
 	copy(sorted, files)
 	sort.Strings(sorted)
@@ -55,59 +71,68 @@ func hashFiles(files []string) string {
 		h.Write([]byte(f))
 		h.Write([]byte{0})
 
-		f, err := os.Open(f)
+		fp, err := os.Open(f)
 		if err != nil {
 			continue
 		}
-		io.Copy(h, f)
-		f.Close()
+		io.Copy(h, fp)
+		fp.Close()
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func checkHash(cache buildCache, key string) (changed bool, hash string, times map[string]int64) {
+	srcPaths := timesToPaths(cache.SrcTimes)
+	times = getFileTimes(srcPaths)
+	hash = hashFiles(srcPaths)
+	return hash != cache.Src, hash, times
+}
+
+func timesToPaths(m map[string]int64) []string {
+	p := make([]string, 0, len(m))
+	for k := range m {
+		p = append(p, k)
+	}
+	return p
+}
+
 func resHashChanged(c buildCache) bool {
-	files := append(getFiles("res", ""), "AndroidManifest.xml")
-	return hashFiles(files) != c.Res
+	return hashFiles(collect("res")) != c.Res
 }
 
 func hashRes() string {
-	files := append(getFiles("res", ""), "AndroidManifest.xml")
-	return hashFiles(files)
+	return hashFiles(collect("res"))
 }
 
 func srcHashChanged(c buildCache) bool {
-	files := append(getFiles("src", ""), getFiles("jar", "")...)
-	return hashFiles(files) != c.Src
+	return hashFiles(collect("src", "jar")) != c.Src
 }
 
 func hashSrc() string {
-	files := append(getFiles("src", ""), getFiles("jar", "")...)
-	return hashFiles(files)
+	return hashFiles(collect("src", "jar"))
 }
 
 func classesHashChanged(c buildCache) bool {
-	files := getFiles(filepath.Join("build", "classes"), ".class")
-	return hashFiles(files) != c.Classes
+	return hashFiles(collectWithExt(filepath.Join("build", "classes"), ".class")) != c.Classes
 }
 
 func hashClasses() string {
-	files := getFiles(filepath.Join("build", "classes"), ".class")
-	return hashFiles(files)
+	return hashFiles(collectWithExt(filepath.Join("build", "classes"), ".class"))
 }
 
 // --- time-based change detection ---
 
 func getFileTimes(files []string) map[string]int64 {
-	times := make(map[string]int64, len(files))
+	m := make(map[string]int64, len(files))
 	for _, f := range files {
 		info, err := os.Stat(f)
 		if err != nil {
 			continue
 		}
-		times[f] = info.ModTime().UnixNano()
+		m[f] = info.ModTime().UnixNano()
 	}
-	return times
+	return m
 }
 
 func timesChanged(current, cached map[string]int64) bool {
@@ -123,31 +148,25 @@ func timesChanged(current, cached map[string]int64) bool {
 }
 
 func resTimeChanged(c buildCache) bool {
-	files := append(getFiles("res", ""), "AndroidManifest.xml")
-	return timesChanged(getFileTimes(files), c.ResTimes)
+	return timesChanged(getFileTimes(collect("res")), c.ResTimes)
 }
 
 func timeRes() map[string]int64 {
-	files := append(getFiles("res", ""), "AndroidManifest.xml")
-	return getFileTimes(files)
+	return getFileTimes(collect("res"))
 }
 
 func srcTimeChanged(c buildCache) bool {
-	files := append(getFiles("src", ""), getFiles("jar", "")...)
-	return timesChanged(getFileTimes(files), c.SrcTimes)
+	return timesChanged(getFileTimes(collect("src", "jar")), c.SrcTimes)
 }
 
 func timeSrc() map[string]int64 {
-	files := append(getFiles("src", ""), getFiles("jar", "")...)
-	return getFileTimes(files)
+	return getFileTimes(collect("src", "jar"))
 }
 
 func classesTimeChanged(c buildCache) bool {
-	files := getFiles(filepath.Join("build", "classes"), ".class")
-	return timesChanged(getFileTimes(files), c.ClassTimes)
+	return timesChanged(getFileTimes(collectWithExt(filepath.Join("build", "classes"), ".class")), c.ClassTimes)
 }
 
 func timeClasses() map[string]int64 {
-	files := getFiles(filepath.Join("build", "classes"), ".class")
-	return getFileTimes(files)
+	return getFileTimes(collectWithExt(filepath.Join("build", "classes"), ".class"))
 }

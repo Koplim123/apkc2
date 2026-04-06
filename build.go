@@ -10,84 +10,90 @@ import (
 	"strings"
 )
 
-// build compiles all the source code and bundles into apk file with dependencies
+type buildOpts struct {
+	useAAB       bool
+	incremental  bool
+	useHash      bool
+	javaEncoding string
+	keyStore     *string
+	storePass    *string
+	keyAlias     *string
+	sigAlg       *string
+}
+
+// build compiles all source code and bundles into an apk/aab file.
 func build() {
-	buildCmd := flag.NewFlagSet("build", flag.ExitOnError)
+	cmd := flag.NewFlagSet("build", flag.ExitOnError)
 
-	useAAB := buildCmd.Bool("aab", false, "build aab instead of apk")
-	useUTF8 := buildCmd.Bool("utf8", false, "use UTF-8 source encoding for javac")
-	useGBK := buildCmd.Bool("gbk", false, "use GBK source encoding for javac")
-	useUTF8BOM := buildCmd.Bool("utf8wBOM", false, "use UTF-8 with BOM source encoding for javac")
-	incremental := buildCmd.Bool("ic", false, "incremental build (time-based)")
-	useHash := buildCmd.Bool("h", false, "use hash for incremental detection (requires -ic)")
-	keyStore := buildCmd.String("keystore", keyStorePath, "path to keystore")
-	storePass := buildCmd.String("storepass", "android", "keystore password")
-	keyAlias := buildCmd.String("keyalias", "androiddebugkey", "key alias to use")
-	sigAlg := buildCmd.String("sigalg", "SHA256withRSA", "signature to use")
+	opts := buildOpts{
+		useAAB:    *cmd.Bool("aab", false, "build aab instead of apk"),
+		incremental: *cmd.Bool("ic", false, "incremental build (time-based)"),
+		useHash:   *cmd.Bool("h", false, "use hash for incremental detection (requires -ic)"),
+		keyStore:  cmd.String("keystore", keyStorePath, "path to keystore"),
+		storePass: cmd.String("storepass", "android", "keystore password"),
+		keyAlias:  cmd.String("keyalias", "androiddebugkey", "key alias to use"),
+		sigAlg:    cmd.String("sigalg", "SHA256withRSA", "signature algorithm"),
+	}
+	encUTF8 := cmd.Bool("utf8", false, "use UTF-8 source encoding for javac")
+	encGBK := cmd.Bool("gbk", false, "use GBK source encoding for javac")
+	encUTF8BOM := cmd.Bool("utf8bom", false, "use UTF-8 with BOM source encoding for javac")
 
-	buildCmd.Parse(os.Args[2:])
+	cmd.Parse(os.Args[2:])
 
-	if *useHash && !*incremental {
+	if *encUTF8 && *encGBK || *encUTF8 && *encUTF8BOM || *encGBK && *encUTF8BOM {
+		LogF("build", "only one encoding flag (--utf8, --gbk, --utf8bom) may be specified")
+	}
+	if opts.useHash && !opts.incremental {
 		LogF("build", "-h requires -ic flag")
 	}
 
-	javaEncoding := resolveJavaEncoding(*useUTF8, *useGBK, *useUTF8BOM)
+	switch {
+	case *encGBK:
+		opts.javaEncoding = "GBK"
+	case *encUTF8, *encUTF8BOM:
+		opts.javaEncoding = "UTF-8"
+	default:
+		opts.javaEncoding = "UTF-8"
+	}
 
 	prepare()
 
-	if *incremental {
-		if *useHash {
+	if opts.incremental {
+		if opts.useHash {
 			LogI("build", "incremental build (hash mode)")
 		} else {
 			LogI("build", "incremental build (time mode)")
 		}
-		buildIncremental(*useAAB, *useHash, javaEncoding, keyStore, storePass, keyAlias, sigAlg)
+		buildIncremental(opts)
 	} else {
-		buildFull(*useAAB, javaEncoding, keyStore, storePass, keyAlias, sigAlg)
+		buildFull(opts)
 	}
 }
 
-func resolveJavaEncoding(useUTF8, useGBK, useUTF8BOM bool) string {
-	selected := 0
-	if useUTF8 {
-		selected++
-	}
-	if useGBK {
-		selected++
-	}
-	if useUTF8BOM {
-		selected++
-	}
-	if selected > 1 {
-		LogF("build", "only one of --utf8, --gbk, --utf8wBOM can be specified")
-	}
-	if useGBK {
-		return "GBK"
-	}
-	return "UTF-8"
-}
-
-func buildFull(useAAB bool, javaEncoding string, keyStore, storePass, keyAlias, sigAlg *string) {
+func buildFull(opts buildOpts) {
 	compileRes()
-	bundleRes(useAAB)
+	bundleRes(opts.useAAB)
 	compileKotlin()
-	compileJava(javaEncoding)
+	compileJava(opts.javaEncoding)
 	bundleJava()
-	if useAAB {
-		buildBundle()
-		buildAAB()
-		signAAB(keyStore, storePass, keyAlias, sigAlg)
-	} else {
-		addDexToAPK(filepath.Join("build", "unaligned.apk"), filepath.Join("build", "classes.dex"))
-		signAPK(keyStore, storePass, keyAlias)
-	}
+	pack(opts)
 }
 
-func buildIncremental(useAAB bool, useHash bool, javaEncoding string, keyStore, storePass, keyAlias, sigAlg *string) {
+func buildIncremental(opts buildOpts) {
 	cache := loadCache()
 
+	if opts.javaEncoding != cache.Encoding {
+		// Encoding changed: invalidate all source and class artifacts.
+		cache.Src = ""
+		cache.Classes = ""
+		cache.SrcTimes = nil
+		cache.ClassTimes = nil
+		cache.Encoding = opts.javaEncoding
+		saveCache(cache)
+	}
+
 	var resUpdated, srcUpdated, clsUpdated bool
-	if useHash {
+	if opts.useHash {
 		resUpdated = resHashChanged(cache)
 		srcUpdated = srcHashChanged(cache)
 		clsUpdated = classesHashChanged(cache)
@@ -102,14 +108,13 @@ func buildIncremental(useAAB bool, useHash bool, javaEncoding string, keyStore, 
 	} else {
 		LogI("build", "skipping resource compilation (unchanged)")
 	}
-	bundleRes(useAAB)
-	// bundleRes always regenerates src/R.java; refresh SrcTimes now so the
-	// updated mtime is not mistaken for a source change on the next run.
-	if !useHash {
-		cache.SrcTimes = timeSrc()
-	}
+	bundleRes(opts.useAAB)
+
+	// bundleRes always regenerates src/R.java; snapshot SrcTimes immediately
+	// so the new mtime is not misread as a source change on the next run.
+	cache.SrcTimes = timeSrc()
 	if resUpdated {
-		if useHash {
+		if opts.useHash {
 			cache.Res = hashRes()
 		}
 		cache.ResTimes = timeRes()
@@ -118,8 +123,8 @@ func buildIncremental(useAAB bool, useHash bool, javaEncoding string, keyStore, 
 
 	if srcUpdated {
 		compileKotlin()
-		compileJava(javaEncoding)
-		if useHash {
+		compileJava(opts.javaEncoding)
+		if opts.useHash {
 			cache.Src = hashSrc()
 		}
 		cache.SrcTimes = timeSrc()
@@ -130,7 +135,7 @@ func buildIncremental(useAAB bool, useHash bool, javaEncoding string, keyStore, 
 
 	if srcUpdated || clsUpdated {
 		bundleJava()
-		if useHash {
+		if opts.useHash {
 			cache.Classes = hashClasses()
 		}
 		cache.ClassTimes = timeClasses()
@@ -139,51 +144,44 @@ func buildIncremental(useAAB bool, useHash bool, javaEncoding string, keyStore, 
 		LogI("build", "skipping dex bundling (unchanged)")
 	}
 
-	if useAAB {
+	pack(opts)
+}
+
+func pack(opts buildOpts) {
+	if opts.useAAB {
 		buildBundle()
 		buildAAB()
-		signAAB(keyStore, storePass, keyAlias, sigAlg)
+		signAAB(opts.keyStore, opts.storePass, opts.keyAlias, opts.sigAlg)
 	} else {
 		addDexToAPK(filepath.Join("build", "unaligned.apk"), filepath.Join("build", "classes.dex"))
-		signAPK(keyStore, storePass, keyAlias)
+		signAPK(opts.keyStore, opts.storePass, opts.keyAlias)
 	}
 }
 
-// clean simply deletes the build dir
+// clean simply deletes the build dir.
 func clean() {
 	LogI("clean", "removing build/*")
 	os.RemoveAll("build")
 }
 
-// prepare verifies the project paths and setup the build dir
+// prepare verifies the project layout and sets up the build directory.
 func prepare() {
-	mustExist := func(path string) {
+	for _, path := range []string{"src", "res", "AndroidManifest.xml"} {
 		if _, err := os.Stat(path); err != nil {
 			LogF("build", err)
 		}
 	}
-
-	mustExist("src")
-	mustExist("res")
-	mustExist("AndroidManifest.xml")
-
-	mustMkdir := func(path string) {
-		// only ignore if error is "already exist"
-		if err := os.MkdirAll(path, 0755); err != nil && !os.IsExist(err) {
+	for _, dir := range []string{filepath.Join("build", "flats"), filepath.Join("build", "classes")} {
+		if err := os.MkdirAll(dir, 0755); err != nil && !os.IsExist(err) {
 			LogF("build", err)
 		}
 	}
-
-	mustMkdir(filepath.Join("build", "flats"))
-	mustMkdir(filepath.Join("build", "classes"))
 }
 
-// compileRes compiles the xml files in res dir
 func compileRes() {
-	res := getFiles("res", "")
 	LogI("build", "compiling resources")
 	args := []string{"compile", "-o", filepath.Join("build", "flats")}
-	args = append(args, res...)
+	args = append(args, getFiles("res", "")...)
 	cmd := exec.Command(aapt2Path, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -193,15 +191,13 @@ func compileRes() {
 
 func bundleRes(useAAB bool) {
 	LogI("build", "bundling resources")
-
-	flats := getFiles("build/flats", ".flat")
 	args := []string{"link", "-I", androidJar, "--manifest", "AndroidManifest.xml", "--java", "src"}
 	if useAAB {
 		args = append(args, "-o", "build", "--output-to-dir", "--proto-format")
 	} else {
 		args = append(args, "-o", filepath.Join("build", "unaligned.apk"))
 	}
-	args = append(args, flats...)
+	args = append(args, getFiles("build/flats", ".flat")...)
 	cmd := exec.Command(aapt2Path, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -210,23 +206,19 @@ func bundleRes(useAAB bool) {
 }
 
 func compileKotlin() {
-	kotlins := getFiles("src", "kt")
-	if len(kotlins) < 1 {
+	ktFiles := getFiles("src", "kt")
+	if len(ktFiles) == 0 {
 		return
 	}
 
 	LogI("build", "compiling kotlin files")
-
-	jars := strings.Join(getFiles("jar", "jar"), string(os.PathListSeparator))
-
-	classpathParts := []string{androidJar}
-	if jars != "" {
-		classpathParts = append(classpathParts, jars)
+	cp := androidJar
+	if jars := getFiles("jar", "jar"); len(jars) > 0 {
+		cp = strings.Join(append([]string{androidJar}, jars...), string(os.PathListSeparator))
 	}
-	classpath := strings.Join(classpathParts, string(os.PathListSeparator))
 
-	args := []string{"-jvm-target", "1.8", "-d", filepath.Join("build", "classes"), "-classpath", classpath, "src"}
-	args = append(args, kotlins...)
+	args := []string{"-jvm-target", "1.8", "-d", filepath.Join("build", "classes"), "-classpath", cp, "src"}
+	args = append(args, ktFiles...)
 	cmd := exec.Command(kotlincPath, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -234,7 +226,6 @@ func compileKotlin() {
 	}
 }
 
-// compileJava compiles java files in src dir and uses jar files in the jar dir as classpath
 func compileJava(encoding string) {
 	javas := getFiles("src", "java")
 	if len(javas) == 0 {
@@ -242,16 +233,19 @@ func compileJava(encoding string) {
 	}
 
 	LogI("build", "compiling java files")
-
-	classpathParts := []string{androidJar, filepath.Join("build", "classes"), "src"}
-	if jarFiles := getFiles("jar", "jar"); len(jarFiles) > 0 {
-		classpathParts = append(classpathParts, strings.Join(jarFiles, string(os.PathListSeparator)))
+	classpath := androidJar + string(os.PathListSeparator) +
+		filepath.Join("build", "classes") + string(os.PathListSeparator) + "src"
+	if jars := getFiles("jar", "jar"); len(jars) > 0 {
+		classpath += string(os.PathListSeparator) + strings.Join(jars, string(os.PathListSeparator))
 	}
-	classpath := strings.Join(classpathParts, string(os.PathListSeparator))
 
-	args := []string{"-encoding", encoding, "-source", "8", "-target", "8", "-d", filepath.Join("build", "classes"), "-classpath", classpath}
+	args := []string{
+		"-encoding", encoding,
+		"-source", "8", "-target", "8",
+		"-d", filepath.Join("build", "classes"),
+		"-classpath", classpath,
+	}
 	args = append(args, javas...)
-
 	cmd := exec.Command(javacPath, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -259,10 +253,8 @@ func compileJava(encoding string) {
 	}
 }
 
-// bundleJava bundles compiled java class files and external jar files into apk
 func bundleJava() {
 	LogI("build", "bundling classes and jars")
-
 	classes := getFiles(filepath.Join("build", "classes"), ".class")
 	jars := getFiles("jar", ".jar")
 
@@ -271,13 +263,12 @@ func bundleJava() {
 	args = append(args, jars...)
 
 	var cmd *exec.Cmd
-	lowerD8Path := strings.ToLower(d8Path)
-	if strings.HasSuffix(lowerD8Path, ".bat") || strings.HasSuffix(lowerD8Path, ".cmd") {
+	lowerD8 := strings.ToLower(d8Path)
+	if strings.HasSuffix(lowerD8, ".bat") || strings.HasSuffix(lowerD8, ".cmd") {
 		javaExec := "java"
 		if javaBinPath != "" {
 			javaExec = filepath.Join(javaBinPath, "java.exe")
 		}
-
 		d8Jar := filepath.Join(filepath.Dir(d8Path), "lib", "d8.jar")
 		cmdArgs := []string{"-cp", d8Jar, "com.android.tools.r8.D8"}
 		cmdArgs = append(cmdArgs, args...)
@@ -297,66 +288,61 @@ func buildBundle() {
 	if err != nil {
 		LogF("build", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if cerr := outFile.Close(); cerr != nil && err == nil {
+			LogF("build", cerr)
+		}
+	}()
 
 	w := zip.NewWriter(outFile)
+	defer w.Close()
 
-	addFileToZip := func(s, d string, compress bool) {
-		var dst io.Writer
-		if compress {
-			dst, err = w.Create(d)
-		} else {
-			dst, err = w.CreateHeader(&zip.FileHeader{
-				Name:   d,
+	addFileToZip := func(srcPath, zipPath string, compress bool) {
+		dst, zerr := w.Create(zipPath)
+		if !compress || zerr != nil {
+			dst, zerr = w.CreateHeader(&zip.FileHeader{
+				Name:   zipPath,
 				Method: zip.Store,
 			})
 		}
-		if err != nil {
-			LogF("build", err)
+		if zerr != nil {
+			LogF("build", zerr)
 		}
 
-		src, err := os.Open(s)
-		if err != nil {
-			LogF("build", err)
+		src, serr := os.Open(srcPath)
+		if serr != nil {
+			LogF("build", serr)
 		}
-
-		_, err = io.Copy(dst, src)
-		if err != nil {
-			LogF("build", err)
+		if _, cerr := io.Copy(dst, src); cerr != nil {
+			src.Close()
+			LogF("build", cerr)
 		}
+		src.Close()
 	}
 
 	addFileToZip(filepath.Join("build", "AndroidManifest.xml"), filepath.Join("manifest", "AndroidManifest.xml"), true)
 	addFileToZip(filepath.Join("build", "classes.dex"), filepath.Join("dex", "classes.dex"), true)
 	addFileToZip(filepath.Join("build", "resources.pb"), "resources.pb", true)
 
-	files := getFiles(filepath.Join("build", "res"), "")
-	for _, f := range files {
-		r, err := filepath.Rel("build", f)
+	for _, f := range getFiles(filepath.Join("build", "res"), "") {
+		rel, err := filepath.Rel("build", f)
 		if err != nil {
 			LogF("build", err)
 		}
-		addFileToZip(f, r, true)
+		addFileToZip(f, rel, true)
 	}
 
-	files = getFiles("assets", "")
-	if len(files) > 0 {
+	if assets := getFiles("assets", ""); len(assets) > 0 {
 		LogI("build", "bundling assets")
-	}
-	for _, f := range files {
-		addFileToZip(f, f, true)
+		for _, f := range assets {
+			addFileToZip(f, f, true)
+		}
 	}
 
-	files = getFiles("lib", "")
-	if len(files) > 0 {
+	if libs := getFiles("lib", ""); len(libs) > 0 {
 		LogI("build", "bundling native libs")
-	}
-	for _, f := range files {
-		addFileToZip(f, f, true)
-	}
-
-	err = w.Close()
-	if err != nil {
-		LogF("build", err)
+		for _, f := range libs {
+			addFileToZip(f, f, true)
+		}
 	}
 }
