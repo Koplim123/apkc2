@@ -39,6 +39,7 @@ commands:
 doctor - check if Android sdk is accessible
 create - create a new project
 build  - build apk
+         flags: -ic [-h] [--utf8|--gbk|--utf8wBOM]
 run    - build apk and run the available device
 clean  - delete build/ dir
 `)
