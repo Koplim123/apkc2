@@ -25,20 +25,28 @@ type buildOpts struct {
 func build() {
 	cmd := flag.NewFlagSet("build", flag.ExitOnError)
 
-	opts := buildOpts{
-		useAAB:    *cmd.Bool("aab", false, "build aab instead of apk"),
-		incremental: *cmd.Bool("ic", false, "incremental build (time-based)"),
-		useHash:   *cmd.Bool("h", false, "use hash for incremental detection (requires -ic)"),
-		keyStore:  cmd.String("keystore", keyStorePath, "path to keystore"),
-		storePass: cmd.String("storepass", "android", "keystore password"),
-		keyAlias:  cmd.String("keyalias", "androiddebugkey", "key alias to use"),
-		sigAlg:    cmd.String("sigalg", "SHA256withRSA", "signature algorithm"),
-	}
+	useAAB := cmd.Bool("aab", false, "build aab instead of apk")
+	incremental := cmd.Bool("ic", false, "incremental build (time-based)")
+	useHash := cmd.Bool("h", false, "use hash for incremental detection (requires -ic)")
+	keyStore := cmd.String("keystore", keyStorePath, "path to keystore")
+	storePass := cmd.String("storepass", "android", "keystore password")
+	keyAlias := cmd.String("keyalias", "androiddebugkey", "key alias to use")
+	sigAlg := cmd.String("sigalg", "SHA256withRSA", "signature algorithm")
 	encUTF8 := cmd.Bool("utf8", false, "use UTF-8 source encoding for javac")
 	encGBK := cmd.Bool("gbk", false, "use GBK source encoding for javac")
 	encUTF8BOM := cmd.Bool("utf8bom", false, "use UTF-8 with BOM source encoding for javac")
 
 	cmd.Parse(os.Args[2:])
+
+	opts := buildOpts{
+		useAAB:      *useAAB,
+		incremental: *incremental,
+		useHash:     *useHash,
+		keyStore:    keyStore,
+		storePass:   storePass,
+		keyAlias:    keyAlias,
+		sigAlg:      sigAlg,
+	}
 
 	if *encUTF8 && *encGBK || *encUTF8 && *encUTF8BOM || *encGBK && *encUTF8BOM {
 		LogF("build", "only one encoding flag (--utf8, --gbk, --utf8bom) may be specified")
